@@ -44,29 +44,6 @@ void plutovg_color_init_argb32(plutovg_color_t* color, unsigned int value)
     plutovg_color_init_rgba8(color, r, g, b, a);
 }
 
-void plutovg_color_init_hsl(plutovg_color_t* color, float h, float s, float l)
-{
-    plutovg_color_init_hsla(color, h, s, l, 1.f);
-}
-
-static inline float hsl_component(float h, float s, float l, float n)
-{
-    const float k = fmodf(n + h / 30.f, 12.f);
-    const float a = s * plutovg_min(l, 1.f - l);
-    return l - a * plutovg_max(-1.f, plutovg_min(1.f, plutovg_min(k - 3.f, 9.f - k)));
-}
-
-void plutovg_color_init_hsla(plutovg_color_t* color, float h, float s, float l, float a)
-{
-    h = fmodf(h, 360.f);
-    if(h < 0.f) { h += 360.f; }
-
-    float r = hsl_component(h, s, l, 0);
-    float g = hsl_component(h, s, l, 8);
-    float b = hsl_component(h, s, l, 4);
-    plutovg_color_init_rgba(color, r, g, b, a);
-}
-
 unsigned int plutovg_color_to_rgba32(const plutovg_color_t* color)
 {
     uint32_t r = lroundf(color->r * 255);
@@ -91,19 +68,27 @@ static inline uint8_t hex_digit(uint8_t c)
         return c - '0';
     if(c >= 'a' && c <= 'f')
         return 10 + c - 'a';
-    return 10 + c - 'A';
+    if(c >= 'A' && c <= 'F')
+        return 10 + c - 'A';
+    return 0;
 }
 
-static inline uint8_t hex_byte(uint8_t c1, uint8_t c2)
+static inline uint8_t hex_expand(uint8_t c)
+{
+    uint8_t h = hex_digit(c);
+    return (h << 4) | h;
+}
+
+static inline uint8_t hex_combine(uint8_t c1, uint8_t c2)
 {
     uint8_t h1 = hex_digit(c1);
     uint8_t h2 = hex_digit(c2);
     return (h1 << 4) | h2;
 }
 
-#define MAX_NAME 20
+#define MAX_NAME 24
 typedef struct {
-    const char* name;
+    char name[MAX_NAME];
     uint32_t value;
 } color_entry_t;
 
@@ -114,25 +99,27 @@ static int color_entry_compare(const void* a, const void* b)
     return strcmp(name, entry->name);
 }
 
-static bool parse_rgb_component(const char** begin, const char* end, float* component)
+static bool parse_rgb_component(const char** begin, const char* end, int* component)
 {
     float value = 0;
     if(!plutovg_parse_number(begin, end, &value))
         return false;
     if(plutovg_skip_delim(begin, end, '%'))
         value *= 2.55f;
-    *component = plutovg_clamp(value, 0.f, 255.f) / 255.f;
+    value = plutovg_clamp(value, 0.f, 255.f);
+    *component = lroundf(value);
     return true;
 }
 
-static bool parse_alpha_component(const char** begin, const char* end, float* component)
+static bool parse_alpha_component(const char** begin, const char* end, int* component)
 {
     float value = 0;
     if(!plutovg_parse_number(begin, end, &value))
         return false;
     if(plutovg_skip_delim(begin, end, '%'))
         value /= 100.f;
-    *component = plutovg_clamp(value, 0.f, 1.f);
+    value = plutovg_clamp(value, 0.f, 1.f);
+    *component = lroundf(value * 255.f);
     return true;
 }
 
@@ -150,18 +137,18 @@ int plutovg_color_parse(plutovg_color_t* color, const char* data, int length)
             ++it;
         int count = it - begin;
         if(count == 3 || count == 4) {
-            r = hex_byte(begin[0], begin[0]);
-            g = hex_byte(begin[1], begin[1]);
-            b = hex_byte(begin[2], begin[2]);
+            r = hex_expand(begin[0]);
+            g = hex_expand(begin[1]);
+            b = hex_expand(begin[2]);
             if(count == 4) {
-                a = hex_byte(begin[3], begin[3]);
+                a = hex_expand(begin[3]);
             }
         } else if(count == 6 || count == 8) {
-            r = hex_byte(begin[0], begin[1]);
-            g = hex_byte(begin[2], begin[3]);
-            b = hex_byte(begin[4], begin[5]);
+            r = hex_combine(begin[0], begin[1]);
+            g = hex_combine(begin[2], begin[3]);
+            b = hex_combine(begin[4], begin[5]);
             if(count == 8) {
-                a = hex_byte(begin[6], begin[7]);
+                a = hex_combine(begin[6], begin[7]);
             }
         } else {
             return 0;
@@ -180,7 +167,7 @@ int plutovg_color_parse(plutovg_color_t* color, const char* data, int length)
         } else if(strcmp(name, "rgb") == 0 || strcmp(name, "rgba") == 0) {
             if(!plutovg_skip_ws_and_delim(&it, end, '('))
                 return 0;
-            float r, g, b, a = 1.f;
+            int r, g, b, a = 255;
             if(!parse_rgb_component(&it, end, &r)
                 || !plutovg_skip_ws_and_comma(&it, end)
                 || !parse_rgb_component(&it, end, &g)
@@ -197,28 +184,7 @@ int plutovg_color_parse(plutovg_color_t* color, const char* data, int length)
             plutovg_skip_ws(&it, end);
             if(!plutovg_skip_delim(&it, end, ')'))
                 return 0;
-            plutovg_color_init_rgba(color, r, g, b, a);
-        } else if(strcmp(name, "hsl") == 0 || strcmp(name, "hsla") == 0) {
-            if(!plutovg_skip_ws_and_delim(&it, end, '('))
-                return 0;
-            float h, s, l, a = 1.f;
-            if(!plutovg_parse_number(&it, end, &h)
-                || !plutovg_skip_ws_and_comma(&it, end)
-                || !parse_alpha_component(&it, end, &s)
-                || !plutovg_skip_ws_and_comma(&it, end)
-                || !parse_alpha_component(&it, end, &l)) {
-                return 0;
-            }
-
-            if(plutovg_skip_ws_and_comma(&it, end)
-                && !parse_alpha_component(&it, end, &a)) {
-                return 0;
-            }
-
-            plutovg_skip_ws(&it, end);
-            if(!plutovg_skip_delim(&it, end, ')'))
-                return 0;
-            plutovg_color_init_hsla(color, h, s, l, a);
+            plutovg_color_init_rgba8(color, r, g, b, a);
         } else {
             static const color_entry_t colormap[] = {
                 {"aliceblue", 0xF0F8FF},
@@ -385,7 +351,7 @@ int plutovg_color_parse(plutovg_color_t* color, const char* data, int length)
 static void* plutovg_paint_create(plutovg_paint_type_t type, size_t size)
 {
     plutovg_paint_t* paint = malloc(size);
-    plutovg_init_reference(paint);
+    paint->ref_count = 1;
     paint->type = type;
     return paint;
 }
@@ -433,6 +399,15 @@ static plutovg_gradient_paint_t* plutovg_gradient_create(plutovg_gradient_type_t
     return gradient;
 }
 
+plutovg_paint_t* plutovg_paint_create_conical_gradient(float cx, float cy, float angle, plutovg_spread_method_t spread, const plutovg_gradient_stop_t* stops, int nstops, const plutovg_matrix_t* matrix)
+{
+    plutovg_gradient_paint_t* gradient = plutovg_gradient_create(PLUTOVG_GRADIENT_TYPE_CONICAL, spread, stops, nstops, matrix);
+    gradient->values[0] = cx;
+    gradient->values[1] = cy;
+    gradient->values[2] = angle;
+    return &gradient->base;
+}
+
 plutovg_paint_t* plutovg_paint_create_linear_gradient(float x1, float y1, float x2, float y2, plutovg_spread_method_t spread, const plutovg_gradient_stop_t* stops, int nstops, const plutovg_matrix_t* matrix)
 {
     plutovg_gradient_paint_t* gradient = plutovg_gradient_create(PLUTOVG_GRADIENT_TYPE_LINEAR, spread, stops, nstops, matrix);
@@ -467,13 +442,17 @@ plutovg_paint_t* plutovg_paint_create_texture(plutovg_surface_t* surface, plutov
 
 plutovg_paint_t* plutovg_paint_reference(plutovg_paint_t* paint)
 {
-    plutovg_increment_reference(paint);
+    if(paint == NULL)
+        return NULL;
+    ++paint->ref_count;
     return paint;
 }
 
 void plutovg_paint_destroy(plutovg_paint_t* paint)
 {
-    if(plutovg_destroy_reference(paint)) {
+    if(paint == NULL)
+        return;
+    if(--paint->ref_count == 0) {
         if(paint->type == PLUTOVG_PAINT_TYPE_TEXTURE) {
             plutovg_texture_paint_t* texture = (plutovg_texture_paint_t*)(paint);
             plutovg_surface_destroy(texture->surface);
@@ -485,5 +464,7 @@ void plutovg_paint_destroy(plutovg_paint_t* paint)
 
 int plutovg_paint_get_reference_count(const plutovg_paint_t* paint)
 {
-    return plutovg_get_reference_count(paint);
+    if(paint)
+        return paint->ref_count;
+    return 0;
 }
